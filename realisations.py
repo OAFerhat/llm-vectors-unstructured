@@ -4,6 +4,8 @@ from neo4j import GraphDatabase
 from neo4j.exceptions import ServiceUnavailable
 import logging
 import argparse
+from tabulate import tabulate
+import openai
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -145,12 +147,148 @@ def create_vector_indexes():
     finally:
         db.close()
 
+def get_embedding(text, api_key):
+    """Get embedding from OpenAI API"""
+    client = openai.OpenAI(api_key=api_key)
+    
+    try:
+        response = client.embeddings.create(
+            model="text-embedding-ada-002",
+            input=text
+        )
+        return response.data[0].embedding
+    except Exception as e:
+        logger.error(f"❌ Error getting embedding from OpenAI: {str(e)}")
+        raise
+
+def wrap_text(text, max_width):
+    """Wrap text to two lines with max width"""
+    if len(text) <= max_width:
+        return text
+    
+    # Find a good breaking point near the middle
+    mid_point = len(text) // 2
+    space_before = text.rfind(' ', 0, mid_point)
+    space_after = text.find(' ', mid_point)
+    
+    break_point = space_before if space_before != -1 else space_after
+    if break_point == -1:
+        # If no good breaking point, just truncate
+        return text[:max_width-3] + "..."
+    
+    first_line = text[:break_point]
+    second_line = text[break_point+1:]
+    
+    # Truncate second line if too long
+    if len(second_line) > max_width:
+        second_line = second_line[:max_width-3] + "..."
+    
+    return f"{first_line}\n{second_line}"
+
+def format_table_data(results, max_question=60, max_answer=100):
+    """Format results into table data with specified maximum widths"""
+    table_data = []
+    headers = ["Similar Question", "Answer", "Score"]
+    
+    for record in results:
+        table_data.append([
+            wrap_text(record["question"], max_question),
+            wrap_text(record["answer"], max_answer),
+            f"{record['score']:.4f}"
+        ])
+    
+    return headers, table_data
+
+def semantic_search():
+    """Perform semantic search on questions and get corresponding answers"""
+    logger.info("Starting semantic search...")
+    
+    # Initialize connection
+    db = Neo4jConnection()
+    
+    try:
+        # Connect to database
+        if not db.connect():
+            return
+            
+        # Get OpenAI API key from environment
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            logger.error("❌ OpenAI API key not found in environment variables!")
+            return
+        
+        while True:
+            # Get user input
+            question = input("\nEnter your question (or 'Q' to quit): ")
+            if question.upper() == 'Q':
+                logger.info("Exiting search...")
+                break
+                
+            logger.info(f"Searching for similar questions to: {question}")
+            
+            # Query to find similar questions and their answers
+            query = """
+            CALL db.index.vector.queryNodes('questions', 5, $embedding)
+            YIELD node, score
+            MATCH (node)-[:ANSWERED_BY]->(answer)
+            RETURN node.text as question, answer.text as answer, score
+            ORDER BY score DESC
+            """
+            
+            try:
+                # Get embedding for the question
+                embedding = get_embedding(question, api_key)
+                
+                # Execute search
+                results = db.execute_query(
+                    query, 
+                    parameters={"embedding": embedding}
+                )
+                
+                # Format results as table
+                if results:
+                    headers, table_data = format_table_data(results)
+                    
+                    # Print results in table format
+                    print("\nSearch Results:")
+                    print(tabulate(
+                        table_data,
+                        headers=headers,
+                        tablefmt="grid",
+                        maxcolwidths=[60, 100, 10]
+                    ))
+                    logger.info("✅ Search completed successfully!")
+                else:
+                    logger.info("No similar questions found.")
+                
+                # Ask if user wants to continue
+                while True:
+                    choice = input("\nWould you like to:\n[S] Search again\n[Q] Quit\nYour choice: ")
+                    if choice.upper() in ['S', 'Q']:
+                        if choice.upper() == 'Q':
+                            logger.info("Exiting search...")
+                            return
+                        break
+                    print("Invalid choice. Please enter 'S' to search again or 'Q' to quit.")
+                    
+            except Exception as e:
+                logger.error(f"❌ An error occurred during this search: {str(e)}")
+                continue
+            
+    except Exception as e:
+        logger.error(f"❌ An error occurred during semantic search: {str(e)}")
+        raise
+    finally:
+        db.close()
+
 def main():
     parser = argparse.ArgumentParser(description='Neo4j Data Operations')
     parser.add_argument('--load-quora', action='store_true', 
                       help='Load Quora Q&A data with embeddings')
     parser.add_argument('--create-indexes', action='store_true',
                       help='Create vector indexes for Question and Answer nodes')
+    parser.add_argument('--search', action='store_true',
+                      help='Perform semantic search on questions')
     
     args = parser.parse_args()
     
@@ -158,6 +296,8 @@ def main():
         load_quora_data()
     elif args.create_indexes:
         create_vector_indexes()
+    elif args.search:
+        semantic_search()
     else:
         parser.print_help()
 
