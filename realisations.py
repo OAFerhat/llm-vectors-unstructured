@@ -95,15 +95,69 @@ def load_quora_data():
     finally:
         db.close()
 
+def create_vector_indexes():
+    """Create vector indexes for Question and Answer nodes"""
+    logger.info("Starting vector indexes creation...")
+    
+    # Query for Question index
+    question_query = """
+    CREATE VECTOR INDEX questions IF NOT EXISTS
+    FOR (q:Question)
+    ON q.embedding
+    OPTIONS {indexConfig: {
+        `vector.dimensions`: 1536,
+        `vector.similarity_function`: 'cosine'
+    }}
+    """
+    
+    # Query for Answer index
+    answer_query = """
+    CREATE VECTOR INDEX answers IF NOT EXISTS
+    FOR (a:Answer)
+    ON a.embedding
+    OPTIONS {indexConfig: {
+        `vector.dimensions`: 1536,
+        `vector.similarity_function`: 'cosine'
+    }}
+    """
+    
+    # Initialize connection
+    db = Neo4jConnection()
+    
+    try:
+        # Connect to database
+        if not db.connect():
+            return
+        
+        # Create Question index
+        logger.info("Creating Question index...")
+        db.execute_query(question_query)
+        logger.info("✅ Question index created successfully!")
+        
+        # Create Answer index
+        logger.info("Creating Answer index...")
+        db.execute_query(answer_query)
+        logger.info("✅ Answer index created successfully!")
+        
+    except Exception as e:
+        logger.error(f"❌ An error occurred while creating indexes: {str(e)}")
+        raise
+    finally:
+        db.close()
+
 def main():
     parser = argparse.ArgumentParser(description='Neo4j Data Operations')
     parser.add_argument('--load-quora', action='store_true', 
                       help='Load Quora Q&A data with embeddings')
+    parser.add_argument('--create-indexes', action='store_true',
+                      help='Create vector indexes for Question and Answer nodes')
     
     args = parser.parse_args()
     
     if args.load_quora:
         load_quora_data()
+    elif args.create_indexes:
+        create_vector_indexes()
     else:
         parser.print_help()
 
