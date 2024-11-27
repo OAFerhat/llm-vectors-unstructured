@@ -6,6 +6,10 @@ import logging
 import argparse
 from tabulate import tabulate
 import openai
+from langchain_community.document_loaders import DirectoryLoader, TextLoader
+from langchain.text_splitter import CharacterTextSplitter
+from langchain_community.vectorstores.neo4j_vector import Neo4jVector
+from langchain_openai import OpenAIEmbeddings
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -281,6 +285,167 @@ def semantic_search():
     finally:
         db.close()
 
+def load_and_chunk_documents():
+    """Load documents from a directory, chunk them, and store in Neo4j with embeddings"""
+    logger.info("Starting document loading and chunking process...")
+    
+    while True:
+        # Get directory path from user
+        dir_path = input("\nEnter the absolute path to your documents directory (or 'Q' to quit): ")
+        if dir_path.upper() == 'Q':
+            logger.info("Exiting document loading...")
+            break
+            
+        if not os.path.exists(dir_path):
+            logger.error(f"❌ Directory not found: {dir_path}")
+            continue
+            
+        try:
+            # Initialize document loader
+            logger.info(f"Loading documents from: {dir_path}")
+            loader = DirectoryLoader(dir_path, glob="**/lesson.adoc", loader_cls=TextLoader)
+            docs = loader.load()
+            logger.info(f"✅ Loaded {len(docs)} documents")
+            
+            # Initialize text splitter
+            text_splitter = CharacterTextSplitter(
+                separator="\n\n",
+                chunk_size=1500,
+                chunk_overlap=200,
+            )
+            
+            # Split documents into chunks
+            logger.info("Splitting documents into chunks...")
+            chunks = text_splitter.split_documents(docs)
+            logger.info(f"✅ Created {len(chunks)} chunks")
+            
+            # Get environment variables
+            api_key = os.getenv("OPENAI_API_KEY")
+            neo4j_uri = os.getenv("NEO4J_URI")
+            neo4j_user = os.getenv("NEO4J_USERNAME")
+            neo4j_pass = os.getenv("NEO4J_PASSWORD")
+            
+            if not all([api_key, neo4j_uri, neo4j_user, neo4j_pass]):
+                logger.error("❌ Missing required environment variables!")
+                continue
+            
+            # Store chunks in Neo4j with embeddings
+            logger.info("Storing chunks in Neo4j and generating embeddings...")
+            neo4j_db = Neo4jVector.from_documents(
+                chunks,
+                OpenAIEmbeddings(openai_api_key=api_key),
+                url=neo4j_uri,
+                username=neo4j_user,
+                password=neo4j_pass,
+                database="neo4j",
+                index_name="chunkVector",
+                node_label="Chunk",
+                text_node_property="text",
+                embedding_node_property="embedding",
+                embedding_function_type="setNodeVectorProperty"  # Updated to use new function
+            )
+            logger.info("✅ Successfully stored chunks with embeddings in Neo4j")
+            
+            # Ask if user wants to continue
+            while True:
+                choice = input("\nWould you like to:\n[L] Load another directory\n[Q] Quit\nYour choice: ")
+                if choice.upper() in ['L', 'Q']:
+                    if choice.upper() == 'Q':
+                        logger.info("Exiting document loading...")
+                        return
+                    break
+                print("Invalid choice. Please enter 'L' to load another directory or 'Q' to quit.")
+                
+        except Exception as e:
+            logger.error(f"❌ An error occurred: {str(e)}")
+            continue
+
+def generic_search():
+    """Search for similar chunks using vector similarity"""
+    logger.info("Starting generic search...")
+    
+    # Initialize Neo4j connection
+    uri = os.getenv("NEO4J_URI")
+    user = os.getenv("NEO4J_USERNAME")
+    password = os.getenv("NEO4J_PASSWORD")
+    api_key = os.getenv("OPENAI_API_KEY")
+    
+    if not all([uri, user, password, api_key]):
+        logger.error("❌ Missing required environment variables!")
+        return
+        
+    db = GraphDatabase.driver(uri, auth=(user, password))
+    openai.api_key = api_key
+    
+    try:
+        while True:
+            # Get search query from user
+            query = input("\nEnter your search query (or 'Q' to quit): ")
+            if query.upper() == 'Q':
+                logger.info("Exiting search...")
+                break
+                
+            # Generate embedding for the query
+            try:
+                response = openai.embeddings.create(
+                    model="text-embedding-ada-002",
+                    input=query
+                )
+                embedding = response.data[0].embedding
+            except Exception as e:
+                logger.error(f"❌ Error generating embedding: {str(e)}")
+                continue
+            
+            # Search for similar chunks
+            with db.session() as session:
+                result = session.run("""
+                    CALL db.index.vector.queryNodes('chunkVector', 5, $embedding)
+                    YIELD node, score
+                    RETURN node.text as text, score
+                    ORDER BY score DESC
+                """, embedding=embedding)
+                
+                results = [{"text": record["text"], "score": record["score"]} 
+                          for record in result]
+                
+                if results:
+                    # Format results into table
+                    table_data = []
+                    headers = ["Text", "Similarity Score"]
+                    
+                    for r in results:
+                        table_data.append([
+                            wrap_text(r["text"], 160),
+                            f"{r['score']:.4f}"
+                        ])
+                    
+                    print("\nSearch Results:")
+                    print(tabulate(
+                        table_data,
+                        headers=headers,
+                        tablefmt="grid",
+                        maxcolwidths=[160, 10]
+                    ))
+                    logger.info("✅ Search completed successfully!")
+                else:
+                    logger.info("No similar chunks found.")
+                
+            # Ask if user wants to continue
+            while True:
+                choice = input("\nWould you like to:\n[S] Search again\n[Q] Quit\nYour choice: ")
+                if choice.upper() in ['S', 'Q']:
+                    if choice.upper() == 'Q':
+                        logger.info("Exiting search...")
+                        return
+                    break
+                print("Invalid choice. Please enter 'S' to search again or 'Q' to quit.")
+                
+    except Exception as e:
+        logger.error(f"❌ An error occurred: {str(e)}")
+        raise
+    finally:
+        db.close()
+
 def main():
     parser = argparse.ArgumentParser(description='Neo4j Data Operations')
     parser.add_argument('--load-quora', action='store_true', 
@@ -289,6 +454,10 @@ def main():
                       help='Create vector indexes for Question and Answer nodes')
     parser.add_argument('--search', action='store_true',
                       help='Perform semantic search on questions')
+    parser.add_argument('--load-docs', action='store_true',
+                      help='Load and chunk documents from a directory')
+    parser.add_argument('--generic-search', action='store_true',
+                      help='Search through document chunks using vector similarity')
     
     args = parser.parse_args()
     
@@ -298,6 +467,10 @@ def main():
         create_vector_indexes()
     elif args.search:
         semantic_search()
+    elif args.load_docs:
+        load_and_chunk_documents()
+    elif args.generic_search:
+        generic_search()
     else:
         parser.print_help()
 
