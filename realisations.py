@@ -10,6 +10,25 @@ from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_community.vectorstores.neo4j_vector import Neo4jVector
 from langchain_openai import OpenAIEmbeddings
+from textblob import TextBlob
+import nltk
+import ssl
+
+try:
+    _create_unverified_https_context = ssl._create_unverified_context
+except AttributeError:
+    pass
+else:
+    ssl._create_default_https_context = _create_unverified_https_context
+
+# Download required NLTK data
+try:
+    nltk.download('punkt')
+    nltk.download('averaged_perceptron_tagger')
+    nltk.download('brown')
+    nltk.download('wordnet')
+except Exception as e:
+    logger.error(f"Error downloading NLTK data: {str(e)}")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -716,6 +735,7 @@ def get_course_data(chunk):
     data['lesson'] = path[-2]
     data['url'] = f"https://graphacademy.neo4j.com/courses/{data['course']}/{data['module']}/{data['lesson']}"
     data['text'] = chunk.page_content
+    data['topics'] = TextBlob(data['text']).noun_phrases
     
     return data
 
@@ -728,7 +748,11 @@ def create_document_hierarchy(tx, data):
         MERGE (l)-[:CONTAINS]->(p:Paragraph {text: $text})
         WITH p
         CALL db.create.setNodeVectorProperty(p, "embedding", $embedding)
-        RETURN p
+        
+        FOREACH (topic in $topics |
+            MERGE (t:Topic {name: topic})
+            MERGE (p)-[:MENTIONS]->(t)
+        )
         """, 
         data
     )
@@ -830,6 +854,118 @@ def load_structured_documents():
     finally:
         driver.close()
 
+def search_paragraphs():
+    """Search through paragraphs and get their lesson context"""
+    logger.info("Starting paragraph search...")
+    
+    # Initialize Neo4j connection
+    uri = os.getenv("NEO4J_URI")
+    user = os.getenv("NEO4J_USERNAME")
+    password = os.getenv("NEO4J_PASSWORD")
+    api_key = os.getenv("OPENAI_API_KEY")
+    
+    if not all([uri, user, password, api_key]):
+        logger.error("❌ Missing required environment variables!")
+        return
+        
+    db = GraphDatabase.driver(uri, auth=(user, password))
+    client = openai.OpenAI(api_key=api_key)
+    
+    try:
+        with db.session() as session:
+            # Check existing vector indexes
+            vector_indexes = check_vector_indexes(session)
+            logger.info(f"Found vector indexes: {vector_indexes}")
+            
+            # Find the index name for Paragraph nodes
+            paragraph_index = None
+            for label, index_name in vector_indexes.items():
+                if label.lower() == 'paragraph':
+                    paragraph_index = index_name
+                    break
+            
+            if not paragraph_index:
+                logger.error("❌ No vector index found for Paragraph nodes!")
+                return
+            
+            while True:
+                # Get search query from user
+                query = input("\nEnter your search query (or 'q' to quit): ")
+                if query.lower() == 'q':
+                    logger.info("Exiting search...")
+                    break
+                
+                # Generate embedding for the query
+                try:
+                    response = client.embeddings.create(
+                        model="text-embedding-ada-002",
+                        input=query
+                    )
+                    embedding = response.data[0].embedding
+                except Exception as e:
+                    logger.error(f"❌ Error generating embedding: {str(e)}")
+                    continue
+                
+                # Search for similar paragraphs with lesson context
+                search_query = f"""
+                    CALL db.index.vector.queryNodes('{paragraph_index}', 5, $embedding)
+                    YIELD node, score
+                    MATCH (l:Lesson)-[:CONTAINS]->(node)
+                    RETURN 
+                        l.name as lesson_name,
+                        l.url as lesson_url,
+                        node.text as paragraph_text,
+                        score
+                    ORDER BY score DESC
+                """
+                
+                try:
+                    result = session.run(search_query, embedding=embedding)
+                    results = list(result)
+                    
+                    if results:
+                        # Format results into table
+                        table_data = []
+                        headers = ["Lesson", "URL", "Relevance", "Content"]
+                        
+                        for r in results:
+                            table_data.append([
+                                r['lesson_name'],
+                                r['lesson_url'],
+                                f"{r['score']:.4f}",
+                                wrap_text(r['paragraph_text'], 80)
+                            ])
+                        
+                        print("\nSearch Results:")
+                        print(tabulate(
+                            table_data,
+                            headers=headers,
+                            tablefmt="grid",
+                            maxcolwidths=[30, 30, 10, 110]
+                        ))
+                        logger.info("✅ Search completed successfully!")
+                    else:
+                        logger.info("No matching paragraphs found.")
+                        
+                except Exception as e:
+                    logger.error(f"❌ Error during search: {str(e)}")
+                    continue
+                
+                # Ask if user wants to continue
+                while True:
+                    choice = input("\nWould you like to:\n[S] Search again\n[Q] Quit\nYour choice: ").upper()
+                    if choice in ['S', 'Q']:
+                        if choice == 'Q':
+                            logger.info("Exiting search...")
+                            return
+                        break
+                    print("Invalid choice. Please enter 'S' to search again or 'Q' to quit.")
+                    
+    except Exception as e:
+        logger.error(f"❌ Error during paragraph search: {str(e)}")
+    finally:
+        db.close()
+
 def main():
     parser = argparse.ArgumentParser(description='Neo4j Data Operations')
     parser.add_argument('--load-quora', action='store_true', 
@@ -838,6 +974,8 @@ def main():
                       help='Manage vector indexes (create/drop) for nodes with embeddings')
     parser.add_argument('--search', action='store_true',
                       help='Perform semantic search on questions')
+    parser.add_argument('--search-paragraphs', action='store_true',
+                      help='Search through paragraphs and get lesson context')
     parser.add_argument('--load-docs', action='store_true',
                       help='Load and chunk documents from a directory')
     parser.add_argument('--generic-search', action='store_true',
@@ -853,6 +991,8 @@ def main():
         manage_vector_indexes(os.getenv("NEO4J_URI"), os.getenv("NEO4J_USERNAME"), os.getenv("NEO4J_PASSWORD"))
     elif args.search:
         semantic_search()
+    elif args.search_paragraphs:
+        search_paragraphs()
     elif args.load_docs:
         load_and_chunk_documents()
     elif args.generic_search:
