@@ -5,6 +5,7 @@ data/*.csv
 data/*.jsonl
 neopy3venv/
 .DS_Store
+llm-vectors-unstructured/data/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
