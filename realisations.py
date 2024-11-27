@@ -885,7 +885,7 @@ def search_paragraphs():
                     break
             
             if not paragraph_index:
-                logger.error("❌ No vector index found for Paragraph nodes!")
+                logger.error("❌ No vector index found for Paragraph nodes! Please create one using the 'Manage Indexes' option.")
                 return
             
             while True:
@@ -967,40 +967,48 @@ def search_paragraphs():
         db.close()
 
 def main():
-    parser = argparse.ArgumentParser(description='Neo4j Data Operations')
-    parser.add_argument('--load-quora', action='store_true', 
-                      help='Load Quora Q&A data with embeddings')
-    parser.add_argument('--manage-indexes', action='store_true',
-                      help='Manage vector indexes (create/drop) for nodes with embeddings')
-    parser.add_argument('--search', action='store_true',
-                      help='Perform semantic search on questions')
-    parser.add_argument('--search-paragraphs', action='store_true',
-                      help='Search through paragraphs and get lesson context')
-    parser.add_argument('--load-docs', action='store_true',
-                      help='Load and chunk documents from a directory')
-    parser.add_argument('--generic-search', action='store_true',
-                      help='Search through document chunks using vector similarity')
-    parser.add_argument('--load-structured', action='store_true',
-                      help='Load documents and create hierarchical structure')
-    
-    args = parser.parse_args()
-    
-    if args.load_quora:
-        load_quora_data()
-    elif args.manage_indexes:
-        manage_vector_indexes(os.getenv("NEO4J_URI"), os.getenv("NEO4J_USERNAME"), os.getenv("NEO4J_PASSWORD"))
-    elif args.search:
-        semantic_search()
-    elif args.search_paragraphs:
-        search_paragraphs()
-    elif args.load_docs:
-        load_and_chunk_documents()
-    elif args.generic_search:
-        generic_search()
-    elif args.load_structured:
-        load_structured_documents()
-    else:
-        parser.print_help()
+    """Main function with interactive menu"""
+    while True:
+        print("\n=== Neo4j Vector Operations Menu ===")
+        print("1. Load Quora Q&A Data")
+        print("2. Search Quora Q&A")
+        print("3. Load Documents")
+        print("4. Search Documents")
+        print("5. Load Structured Documents")
+        print("6. Manage Indexes")
+        print("7. Search Paragraphs")
+        print("Q. Quit")
+        
+        choice = input("\nEnter your choice (1-7 or Q): ").strip().upper()
+        
+        if choice == 'Q':
+            print("Goodbye!")
+            break
+            
+        try:
+            if choice == '1':
+                load_quora_data()
+            elif choice == '2':
+                semantic_search()
+            elif choice == '3':
+                load_and_chunk_documents()
+            elif choice == '4':
+                generic_search()
+            elif choice == '5':
+                load_structured_documents()
+            elif choice == '6':
+                manage_vector_indexes(os.getenv("NEO4J_URI"), 
+                                   os.getenv("NEO4J_USERNAME"), 
+                                   os.getenv("NEO4J_PASSWORD"))
+            elif choice == '7':
+                search_paragraphs()
+            else:
+                print("❌ Invalid choice. Please enter a number between 1 and 7 or Q to quit.")
+                
+        except Exception as e:
+            logger.error(f"❌ An error occurred: {str(e)}")
+            
+        input("\nPress Enter to continue...")
 
 if __name__ == "__main__":
     main()
